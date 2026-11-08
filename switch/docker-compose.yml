@@ -1,0 +1,362 @@
+# Standalone all-in-one Switch stack, running published GHCR images.
+#
+# This file is a VERSIONED CONTRACT: service names, profiles, and the env vars
+# below are the interface Switch Console (and any other consumer) pins against. It
+# is itself published to GHCR as an OCI artifact per `switch-v*` release, tagged
+# with the same version as the images. Change the interface deliberately.
+#
+# Images are pulled from GHCR — nothing is built. Repo users who want the
+# build-from-source flow add the build override (see `just standalone-up`):
+#   docker compose -f standalone-docker-compose.yml -f standalone-docker-compose.build.yml up
+#
+# Profiles keep optional services opt-in:
+#   (core, no profile) postgres, init-db, switch  — always started
+#   collab            mattermost, setup            — Mattermost bridge + seeder
+#   gateway           gateway                      — operator dashboard
+# Select them with `--profile collab --profile gateway` or COMPOSE_PROFILES.
+#
+# init-db is core, not collab, even though the database it seeds
+# (`mattermost`) is only ever read by a collab service. What init-db also
+# does — create the DB_USER runtime role — has nothing to do with the
+# collaboration bridge: switch-core authenticates as that role on every boot,
+# profile or no profile, so the role has to exist before switch does its own
+# grant-and-verify step. Gating that behind `collab` meant a default,
+# Mattermost-less stack pointed switch at a role nobody had created. Creating
+# the unused `mattermost` database on a core-only stack is harmless and
+# idempotent, and keeping one service rather than splitting role creation out
+# of it is simpler than a second init container for one CREATE ROLE. This
+# widens what a default `up` starts, but the contract's service names are
+# unchanged — init-db already existed under `collab`, it just moves to core.
+#
+# Image coordinates are env-interpolated so the same file retargets registries
+# and pins versions without edits:
+#   SWITCH_REGISTRY         (default ghcr.io)
+#   SWITCH_IMAGE_NAMESPACE  (default sandbox-quantum)
+#   SWITCH_VERSION          (REQUIRED — no default, on purpose)
+#
+# SWITCH_VERSION has no fallback. It used to default to `latest`, so a missing
+# or misspelt env var silently floated the whole stack to whatever had most
+# recently been published — a different switch-core on every `up`, with nothing
+# to say so. Compose now refuses to start rather than pick a version nobody
+# asked for (CHOO-1865). `.env.example` sets it, and Switch Console writes it.
+#
+# The `:?` messages below read "required, set it in .env" rather than
+# "required - set it in .env" on purpose. Some Compose builds (observed on
+# v2.6.0) mis-tokenize a `${VAR:?msg}` whose msg contains " - " when it follows
+# other `${...}` substitutions in the same value: part of the message is
+# spliced into the image reference instead of the required-variable check
+# firing, and the daemon then rejects the mangled tag. A comma keeps the
+# wording without the trigger.
+
+# What this compose artifact speaks on the `stack-compose` contract, which is
+# what Switch Console's local-server mode pins against (CHOO-1865). The version this
+# file is published under says which release it is; this says what it speaks.
+# Compose ignores `x-` keys.
+x-switch-contract:
+  name: stack-compose
+  artifact: compose
+  speaks: 1
+  accepts: 1
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "${SWITCH_BIND_ADDR:-127.0.0.1}:${POSTGRES_HOST_PORT:-5432}:5432"
+    environment:
+      # The container's bootstrapped superuser is the SCHEMA OWNER
+      # (DB_OWNER_USER), not the runtime role Switch serves requests as
+      # (DB_USER). Row-level security is inert against a table's owner, so
+      # the role every request authenticates as must be a separate, deliberately
+      # unprivileged login — created below by init-db, once the owner is up.
+      POSTGRES_USER: ${DB_OWNER_USER}
+      POSTGRES_PASSWORD: ${DB_OWNER_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+  # Kept deliberately after Tuwunel was removed. It still holds every media
+  # blob and the raw history, and it is the only copy — the backfill moved the
+  # messages into Postgres but not the files. Dropping it belongs to a later
+  # release than the one that stops reading it.
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_OWNER_USER}"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  init-db:
+    image: postgres:16-alpine
+    # No profile here on purpose — see the note above the profile table. This
+    # runs on every `up`, collab or not, because switch alone needs the
+    # runtime role it creates.
+    environment:
+      PGPASSWORD: ${DB_OWNER_PASSWORD}
+    # Runs as the owner: creating a database and a role both need privileges
+    # the runtime role is deliberately never given. Note the mixed quoting in
+    # the CREATE ROLE / ALTER ROLE statements is not optional — DB_USER is an
+    # identifier (double-quoted, and safe only because .env.example pins it to
+    # a fixed, non-attacker-controlled name) and the password is a string
+    # literal (single-quoted); swapping them would either fail to parse or
+    # quietly create a role named after the password.
+    #
+    # No GRANT here on purpose: on a fresh volume there is nothing yet to
+    # grant. The `switch` database has no tables until switch-core runs
+    # Alembic against the owner connection, so the runtime role's CRUD grants
+    # are issued by switch-core itself at boot, immediately after migrating.
+    # This step only has to make the role exist.
+    #
+    # The trailing ALTER ROLE is what keeps a regenerated .env working on a
+    # reused pgdata volume: the CREATE ROLE guard above skips a role that
+    # already exists, so without it a new DB_PASSWORD would never reach
+    # Postgres. DB_OWNER_PASSWORD gets no such reapplication — it is set once,
+    # as POSTGRES_PASSWORD, by the container's initial bootstrap of its own
+    # superuser, and nothing here ever reissues it. So a regenerated
+    # DB_PASSWORD takes effect on the next `up` with no rebuild, while a
+    # regenerated DB_OWNER_PASSWORD needs the stack (and its volume)
+    # recreated to match.
+    entrypoint: >
+      sh -c "
+        i=0
+        until psql -h postgres -U ${DB_OWNER_USER} -d postgres -c 'SELECT 1' >/dev/null 2>&1; do
+          i=$$((i+1))
+          if [ $$i -ge 30 ]; then
+            echo 'init-db: could not connect to postgres as ${DB_OWNER_USER} after 30 tries.' >&2
+            echo 'Last attempt:' >&2
+            psql -h postgres -U ${DB_OWNER_USER} -d postgres -c 'SELECT 1' >&2
+            echo 'A stale pgdata volume keeps the password it was first created with,' >&2
+            echo 'so a regenerated DB_OWNER_PASSWORD will fail here. Recreate the stack to reset it.' >&2
+            exit 1
+          fi
+          sleep 1
+        done
+        psql -h postgres -U ${DB_OWNER_USER} -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname='mattermost'\" | grep -q 1 ||
+          psql -h postgres -U ${DB_OWNER_USER} -d postgres -c 'CREATE DATABASE mattermost;'
+        psql -h postgres -U ${DB_OWNER_USER} -d postgres -tc \"SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'\" | grep -q 1 ||
+          psql -h postgres -U ${DB_OWNER_USER} -d postgres -c 'CREATE ROLE \"${DB_USER}\" LOGIN PASSWORD '\\''${DB_PASSWORD}'\\'' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;'
+        psql -h postgres -U ${DB_OWNER_USER} -d postgres -c 'ALTER ROLE \"${DB_USER}\" PASSWORD '\\''${DB_PASSWORD}'\\'';'
+      "
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mattermost:
+    # Pinned rather than `latest`: Switch Console embeds this Mattermost's web UI
+    # and depends on its DOM structure, so an unattended upgrade could break
+    # the embedded room view on a `docker compose pull` no one initiated.
+    image: mattermost/mattermost-team-edition:11.9.0
+    # Mattermost publishes team-edition for amd64 only, so an Apple Silicon or
+    # other arm64 host fails the pull outright without this. Runs emulated.
+    platform: linux/amd64
+    profiles: ["collab"]
+    ports:
+      - "${SWITCH_BIND_ADDR:-127.0.0.1}:${MATTERMOST_HOST_PORT:-8065}:8065"
+    volumes:
+  # Kept deliberately after Tuwunel was removed. It still holds every media
+  # blob and the raw history, and it is the only copy — the backfill moved the
+  # messages into Postgres but not the files. Dropping it belongs to a later
+  # release than the one that stops reading it.
+      - mmdata:/mattermost/data
+    environment:
+      MM_SQLSETTINGS_DRIVERNAME: postgres
+      # The owner's credentials, not the runtime role's: init-db creates the
+      # `mattermost` database as the owner, and the runtime role (DB_USER)
+      # neither owns it nor was granted anything on it — only `switch`'s
+      # tables get the runtime role's grants, issued by switch-core itself at
+      # boot. Mattermost's own schema has no row-level security in it, so
+      # there is no isolation reason to run it as the restricted role too.
+      MM_SQLSETTINGS_DATASOURCE: postgres://${DB_OWNER_USER}:${DB_OWNER_PASSWORD}@postgres:5432/mattermost?sslmode=disable
+      MM_SERVICESETTINGS_SITEURL: http://localhost:${MATTERMOST_HOST_PORT:-8065}
+      MM_SERVICESETTINGS_ENABLELOCALMODE: "true"
+      # The first-run onboarding checklist opens a modal over a dimmed page,
+      # which in the embedded room view is chrome the user cannot meaningfully
+      # act on and has to dismiss per account.
+      MM_SERVICESETTINGS_ENABLEONBOARDINGFLOW: "false"
+      # Agents post `switchdash://session?…` deeplinks so a human can jump from
+      # a message to the session behind it. Mattermost only turns known schemes
+      # into links, so without this they render as unclickable plain text.
+      MM_DISPLAYSETTINGS_CUSTOMURLSCHEMES: switchdash
+      MM_SERVICESETTINGS_ENABLEBOTACCOUNTCREATION: "true"
+      MM_SERVICESETTINGS_ENABLEUSERACCESSTOKENS: "true"
+      # Mattermost refuses to call a private address from an integration unless
+      # the host is named here, and a button on a Switch card is delivered by
+      # exactly that path — a POST from this container to switch-core's callback
+      # port on the compose network. Without it a press fails inside Mattermost
+      # and the person sees nothing.
+      MM_SERVICESETTINGS_ALLOWEDUNTRUSTEDINTERNALCONNECTIONS: switch
+      MM_TEAMSETTINGS_ENABLEOPENSERVER: "true"
+      MM_TEAMSETTINGS_TEAMMATENAMEDISPLAY: "full_name"
+      MM_LOGSETTINGS_ENABLEDIAGNOSTICS: "false"
+      MM_LOGSETTINGS_ENABLESENTRY: "false"
+      MM_SERVICESETTINGS_ENABLESECURITYFIXALERT: "false"
+      MM_ANNOUNCEMENTSETTINGS_ADMINNOTICESENABLED: "false"
+      MM_ANNOUNCEMENTSETTINGS_USERNOTICESENABLED: "false"
+      MM_PLUGINSETTINGS_ENABLEREMOTEMARKETPLACE: "false"
+      # Neither plugin is usable in a bundled Switch deployment: Copilot has no
+      # configured provider and throws a 404 looking up its bot on every page
+      # load, and Calls ships a WebRTC service nothing here can reach.
+      MM_PLUGINSETTINGS_PLUGINSTATES: |
+        {"mattermost-ai":{"Enable":false},"com.mattermost.calls":{"Enable":false}}
+    depends_on:
+      init-db:
+        condition: service_completed_successfully
+
+  switch:
+    image: ${SWITCH_REGISTRY:-ghcr.io}/${SWITCH_IMAGE_NAMESPACE:-sandbox-quantum}/switch-core:${SWITCH_VERSION:?required, set it in .env, there is no default}
+    ports:
+      - "${SWITCH_BIND_ADDR:-127.0.0.1}:${API_HOST_PORT:-8000}:8000"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_OWNER_USER: ${DB_OWNER_USER}
+      DB_OWNER_PASSWORD: ${DB_OWNER_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      ID_SERVER_NAME: localhost
+      # The same setting under its old name, for a SWITCH_VERSION released
+      # before the rename, which reads only this one. Drop it once the oldest
+      # supported release reads ID_SERVER_NAME.
+      MATRIX_SERVER_NAME: localhost
+      AGENT_REGISTRATION_TOKEN: ${AGENT_REGISTRATION_TOKEN}
+      SECRET_KEYS: ${SECRET_KEYS:?required, set it in .env (just init-env generates one)}
+      # Legacy, optional: keeps what it signed and encrypted working until the
+      # first boot has re-encrypted stored credentials under SECRET_KEYS.
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-}
+      # Served over plain http on this machine by default, where a Secure
+      # cookie would never be sent back. Set it to true behind https.
+      GATEWAY_COOKIE_SECURE: ${GATEWAY_COOKIE_SECURE:-false}
+      # The bundled Mattermost is on the compose network, a private address,
+      # so it is always allowed; .env adds to it rather than replacing it.
+      OUTBOUND_ALLOWED_PRIVATE_HOSTS: mattermost,${OUTBOUND_ALLOWED_PRIVATE_HOSTS:-}
+      # Replaced by the agent_management feature flag. Still passed through so
+      # switch-core refuses a .env that turns it on, rather than ignoring it.
+      AGENT_MANAGEMENT_ENABLED: ${AGENT_MANAGEMENT_ENABLED:-false}
+      CONTROLLER_TOKEN_SECRET: ${CONTROLLER_TOKEN_SECRET:-}
+      FEATURE_FLAGS_ENABLED: ${FEATURE_FLAGS_ENABLED:-}
+      # JSON objects, so bare keys for the reason given under LOG_FORMAT
+      # below: `${VAR:-}` would hand them an empty string, which fails boot.
+      DISABLED_SERVICES:
+      SERVICE_ACCESS_PROFILES:
+      GATEWAY_ADMIN_EMAIL: ${GATEWAY_ADMIN_EMAIL}
+      GATEWAY_ADMIN_PASSWORD: ${GATEWAY_ADMIN_PASSWORD}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL}
+      GATEWAY_PUBLIC_URL: ${GATEWAY_PUBLIC_URL:-}
+      MESSAGING_PUBLIC_URL: ${MESSAGING_PUBLIC_URL:-}
+      SLACK_APP_CLIENT_ID: ${SLACK_APP_CLIENT_ID:-}
+      SLACK_APP_CLIENT_SECRET: ${SLACK_APP_CLIENT_SECRET:-}
+      SLACK_APP_SIGNING_SECRET: ${SLACK_APP_SIGNING_SECRET:-}
+      DISCORD_APP_CLIENT_ID: ${DISCORD_APP_CLIENT_ID:-}
+      DISCORD_APP_CLIENT_SECRET: ${DISCORD_APP_CLIENT_SECRET:-}
+      DISCORD_APP_BOT_TOKEN: ${DISCORD_APP_BOT_TOKEN:-}
+      DISCORD_APP_APPLICATION_ID: ${DISCORD_APP_APPLICATION_ID:-}
+      TEAMS_APP_CLIENT_ID: ${TEAMS_APP_CLIENT_ID:-}
+      TEAMS_APP_TENANT_ID: ${TEAMS_APP_TENANT_ID:-}
+      TEAMS_APP_CLIENT_SECRET: ${TEAMS_APP_CLIENT_SECRET:-}
+      TEAMS_APP_CERTIFICATE: ${TEAMS_APP_CERTIFICATE:-}
+      TEAMS_APP_CERTIFICATE_PRIVATE_KEY: ${TEAMS_APP_CERTIFICATE_PRIVATE_KEY:-}
+      TEAMS_APP_FEDERATED_TOKEN_FILE: ${TEAMS_APP_FEDERATED_TOKEN_FILE:-}
+      TEAMS_APP_NOTIFICATION_CERTIFICATE: ${TEAMS_APP_NOTIFICATION_CERTIFICATE:-}
+      TEAMS_APP_NOTIFICATION_PRIVATE_KEY: ${TEAMS_APP_NOTIFICATION_PRIVATE_KEY:-}
+      TEAMS_APP_NOTIFICATION_PREVIOUS_PRIVATE_KEY: ${TEAMS_APP_NOTIFICATION_PREVIOUS_PRIVATE_KEY:-}
+      TEAMS_APP_PRIVACY_URL: ${TEAMS_APP_PRIVACY_URL:-}
+      TEAMS_APP_TERMS_URL: ${TEAMS_APP_TERMS_URL:-}
+      TEAMS_APP_NAME: ${TEAMS_APP_NAME:-Agent Switch}
+      # True/false flags, so bare keys for the reason given under LOG_FORMAT
+      # below: `${VAR:-}` would hand them an empty string, which fails boot.
+      DISCORD_APP_MESSAGE_CONTENT:
+      DISCORD_APP_MEMBERS:
+      TELEGRAM_APP_BOT_TOKEN: ${TELEGRAM_APP_BOT_TOKEN:-}
+      TELEGRAM_APP_WEBHOOK_SECRET: ${TELEGRAM_APP_WEBHOOK_SECRET:-}
+      # Observability and log format. Forwarded because this service names
+      # every variable it passes, so without them here, setting any of these
+      # in `.env` does nothing and the Helm chart is the only way to turn
+      # reporting on at all.
+      #
+      # Bare keys, not `${VAR:-}`. The default form sets the variable to an
+      # empty string, and an empty string is not the same as unset to a
+      # settings class that validates: `LOG_FORMAT=""` fails its check and the
+      # container never starts, so every standalone deployment that had not
+      # set these would break. A bare key takes the value from `.env` when it
+      # is there and is left out of the container entirely when it is not.
+      LOG_FORMAT:
+      SERVICE_NAME:
+      ENVIRONMENT:
+      OTLP_ENDPOINT:
+      DEPLOYMENT_ID:
+      OTLP_METRICS_ENABLED:
+      OTLP_LOGS_ENABLED:
+      OTLP_HEADERS:
+      OTLP_EXPORT_INTERVAL_SECONDS:
+      OTLP_TIMEOUT_SECONDS:
+      # Product usage telemetry, forwarded for the same reason and in the same
+      # bare-key form. Switch Console writes TELEMETRY_ENABLED into the `.env`
+      # from the user's "Share usage data" choice, so one consent decision
+      # governs the app and the server it runs for them (CHOO-2890). On a stack
+      # brought up by hand, an operator sets it here the same way.
+      TELEMETRY_ENABLED:
+      TELEMETRY_ENDPOINT:
+      # Which Amplitude project the usage lands in. Unset is prod; Switch
+      # Console writes its own build's environment here for a server it runs.
+      TELEMETRY_ENVIRONMENT:
+      # Whether this is one of the company's own deployments. Switch Console
+      # writes its own answer here for a server it runs.
+      TELEMETRY_INTERNAL:
+      # Switch Console writes true here for a server it runs, so the server's
+      # agents can tell it apart from Switch Cloud and a self-hosted server.
+      MANAGED_BY_CONSOLE:
+      TELEMETRY_SNAPSHOT_INTERVAL_HOURS:
+      # Whether agents and people are drawn by outside avatar services, which
+      # see their names (api.dicebear.com, ui-avatars.com). Unset is true;
+      # false leaves each platform's default icon. A server Switch Console runs
+      # for you always uses the default: Console writes its `.env` afresh on
+      # every start and does not set this.
+      THIRD_PARTY_AVATARS_ENABLED:
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # Without this, switch-core can start migrating (as the owner) and try
+      # its own grant-and-verify of DB_USER (see db/runtime_role.py) before
+      # init-db has created that role at all — a race, not just a missing
+      # role, since init-db polls postgres rather than blocking on its
+      # healthcheck.
+      init-db:
+        condition: service_completed_successfully
+
+  gateway:
+    image: ${SWITCH_REGISTRY:-ghcr.io}/${SWITCH_IMAGE_NAMESPACE:-sandbox-quantum}/gateway:${SWITCH_VERSION:?required, set it in .env, there is no default}
+    profiles: ["gateway"]
+    ports:
+      - "${SWITCH_BIND_ADDR:-127.0.0.1}:${GATEWAY_HOST_PORT:-3000}:3000"
+    depends_on:
+      - switch
+
+  setup:
+    image: ${SWITCH_REGISTRY:-ghcr.io}/${SWITCH_IMAGE_NAMESPACE:-sandbox-quantum}/setup:${SWITCH_VERSION:?required, set it in .env, there is no default}
+    profiles: ["collab"]
+    restart: on-failure
+    environment:
+      SWITCH_URL: http://switch:8000
+      MATTERMOST_URL: http://mattermost:8065
+      MATTERMOST_URL_FOR_SWITCH: http://mattermost:8065
+      # The route back: where the Mattermost container reaches switch-core's
+      # callback port, for the button presses Mattermost delivers by HTTP.
+      MATTERMOST_CALLBACK_BASE_URL: http://switch:8081
+      MATTERMOST_ADMIN_USER: ${MATTERMOST_ADMIN_USER}
+      MATTERMOST_ADMIN_PASSWORD: ${MATTERMOST_ADMIN_PASSWORD}
+      MATTERMOST_TEAM_NAME: ${MATTERMOST_TEAM_NAME}
+      MATTERMOST_USER: ${MATTERMOST_USER}
+      MATTERMOST_USER_PASSWORD: ${MATTERMOST_USER_PASSWORD}
+      GATEWAY_ADMIN_EMAIL: ${GATEWAY_ADMIN_EMAIL}
+      GATEWAY_ADMIN_PASSWORD: ${GATEWAY_ADMIN_PASSWORD}
+    depends_on:
+      - mattermost
+      - switch
+
+volumes:
+  # Kept deliberately after Tuwunel was removed. It still holds every media
+  # blob and the raw history, and it is the only copy — the backfill moved the
+  # messages into Postgres but not the files. Dropping it belongs to a later
+  # release than the one that stops reading it.
+  pgdata:
+  mmdata:
+  tuwuneldata:

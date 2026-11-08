@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mandate Ledger</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #f6f6f3; --panel: #ffffff; --ink: #15171a; --muted: #6b7076; --faint: #9a9fa5; --line: #e7e6e1;
+  --ok: #157f4b; --ok-bg: #e7f5ec; --bad: #b4232c; --bad-bg: #fbe9ea; --warn: #9a5b00; --warn-bg: #fdf1dc;
+  --info: #2b59c3; --info-bg: #e9effc; --acme: #b7791f; --nimbus: #2f855a; --keeper: #15171a;
+  --shadow: 0 1px 2px rgba(20,20,20,.04), 0 4px 16px rgba(20,20,20,.04);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1012; --panel: #17181b; --ink: #ecedee; --muted: #a0a4aa; --faint: #6d7177; --line: #26282c;
+    --ok: #4ccb87; --ok-bg: #132a1e; --bad: #ff6b72; --bad-bg: #2d1416; --warn: #f0b252; --warn-bg: #2c2112;
+    --info: #86a8ff; --info-bg: #161f36; --acme: #e2a84b; --nimbus: #5fc58f; --keeper: #ecedee; --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1012; --panel: #17181b; --ink: #ecedee; --muted: #a0a4aa; --faint: #6d7177; --line: #26282c;
+  --ok: #4ccb87; --ok-bg: #132a1e; --bad: #ff6b72; --bad-bg: #2d1416; --warn: #f0b252; --warn-bg: #2c2112;
+  --info: #86a8ff; --info-bg: #161f36; --acme: #e2a84b; --nimbus: #5fc58f; --keeper: #ecedee; --shadow: none;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 Inter, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+.mono { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; }
+header { max-width: 1180px; margin: 0 auto; padding: 28px 16px 8px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+.brand { font-weight: 700; letter-spacing: -.02em; font-size: 20px; }
+.brand span { color: var(--muted); font-weight: 500; }
+.pill { border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: 600; border: 1px solid var(--line); background: var(--panel); }
+.pill.closed { color: var(--ok); background: var(--ok-bg); border-color: transparent; }
+.pill.agreed { color: var(--info); background: var(--info-bg); border-color: transparent; }
+.pill.negotiating { color: var(--warn); background: var(--warn-bg); border-color: transparent; }
+.spacer { flex: 1; }
+button, .btn { font: inherit; font-size: 13px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 8px; padding: 6px 12px; cursor: pointer; text-decoration: none; }
+button:hover, .btn:hover { border-color: var(--faint); }
+.sub { max-width: 1180px; margin: 0 auto; padding: 0 16px 20px; color: var(--muted); }
+main { max-width: 1180px; margin: 0 auto; padding: 0 16px 48px; display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 20px; }
+@media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); }
+.panel h2 { margin: 0; padding: 14px 18px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); border-bottom: 1px solid var(--line); font-weight: 600; }
+.panel .body { padding: 14px 18px; }
+.stack { display: grid; gap: 20px; align-content: start; }
+.event { display: grid; grid-template-columns: 22px 1fr auto; gap: 10px; padding: 12px 18px; border-bottom: 1px solid var(--line); align-items: start; }
+.event:last-child { border-bottom: 0; }
+.event .icon { width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; font-size: 12px; font-weight: 700; }
+.event .title { font-weight: 600; }
+.event .detail { color: var(--muted); font-size: 13px; }
+.event .time { color: var(--faint); font-size: 12px; white-space: nowrap; }
+.private { margin-top: 6px; font-size: 12px; color: var(--warn); background: var(--warn-bg); border-radius: 6px; padding: 4px 8px; display: inline-block; }
+.ok .icon { background: var(--ok-bg); color: var(--ok); }
+.bad .icon { background: var(--bad-bg); color: var(--bad); }
+.warn .icon { background: var(--warn-bg); color: var(--warn); }
+.info .icon { background: var(--info-bg); color: var(--info); }
+.event.bad { background: linear-gradient(90deg, var(--bad-bg), transparent 60%); }
+.who-acme { color: var(--acme); font-weight: 600; }
+.who-nimbus { color: var(--nimbus); font-weight: 600; }
+.terms { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.terms div { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.terms label { display: block; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.terms b { font-size: 18px; letter-spacing: -.01em; }
+.empty { color: var(--faint); padding: 18px; }
+.row { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px dashed var(--line); }
+.row:last-child { border-bottom: 0; }
+.chain { display: flex; flex-wrap: wrap; gap: 4px; }
+.chain i { width: 18px; height: 18px; border-radius: 4px; background: var(--line); display: block; cursor: help; }
+.chain i.offer { background: var(--info); } .chain i.approval, .chain i.countersign { background: var(--ok); }
+.chain i.accept, .chain i.decline { background: var(--bad); } .chain i.agreement, .chain i.closed { background: var(--ink); }
+.chain i.mandate_committed { background: var(--warn); }
+.checks .row span:first-child { font-weight: 600; }
+.pass { color: var(--ok); font-weight: 700; } .fail { color: var(--bad); font-weight: 700; } .skip { color: var(--faint); font-weight: 700; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.legend { display: flex; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-top: 10px; }
+.legend span::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 5px; background: var(--c); }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">Mandate <span>· referee ledger</span></div>
+  <span id="status" class="pill">loading</span>
+  <div class="spacer"></div>
+  <label class="btn"><input type="checkbox" id="private" style="margin:0 6px 0 0;vertical-align:-1px">Show private limits (demo view)</label>
+  <button id="theme" title="Toggle light or dark theme">Theme</button>
+</header>
+<p class="sub" id="subtitle"></p>
+<main>
+  <section class="panel">
+    <h2>What the referee decided</h2>
+    <div id="timeline"><div class="empty">Waiting for the first message…</div></div>
+  </section>
+  <div class="stack">
+    <section class="panel">
+      <h2>Deal</h2>
+      <div class="body" id="deal"><div class="empty">No agreement yet.</div></div>
+    </section>
+    <section class="panel">
+      <h2>Authority</h2>
+      <div class="body" id="authority"></div>
+    </section>
+    <section class="panel">
+      <h2>Ledger · hash chain</h2>
+      <div class="body">
+        <div class="chain" id="chain"></div>
+        <div class="legend">
+          <span style="--c:var(--warn)">mandate</span><span style="--c:var(--info)">offer</span>
+          <span style="--c:var(--bad)">blocked accept / decline</span><span style="--c:var(--ok)">approval / countersign</span>
+          <span style="--c:var(--ink)">agreement / close</span>
+        </div>
+        <p class="mono" id="root" style="color:var(--muted);word-break:break-all;margin:12px 0 0"></p>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Verify a certificate</h2>
+      <div class="body">
+        <div class="actions">
+          <a class="btn" id="dl-cert" href="#" hidden>Download certificate</a>
+          <a class="btn" id="dl-pdf" href="#" hidden target="_blank">Order form PDF</a>
+          <button id="verify-current" hidden>Verify this deal</button>
+          <label class="btn">Check a file…<input type="file" id="file" accept=".json" hidden></label>
+        </div>
+        <div class="checks" id="checks" style="margin-top:12px"></div>
+      </div>
+    </section>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let last = "", state = null;
+try { const t = new URLSearchParams(location.search).get("theme") || localStorage.getItem("mandate-theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+$("theme").onclick = () => {
+  const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  const next = cur === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem("mandate-theme", next); } catch (e) {}
+};
+$("private").onchange = () => render(state);
+
+function who(name, deal) {
+  if (!deal) return esc(name);
+  for (const side of ["buyer", "seller"]) {
+    const c = deal[side];
+    if (name === c.agent || c.principals.includes(name)) return `<span class="who-${c.key}">${esc(name)}</span>`;
+  }
+  return esc(name);
+}
+function company(key, deal) { const c = deal && [deal.buyer, deal.seller].find((x) => x.key === key); return c ? `<span class="who-${key}">${esc(c.name)}</span>` : esc(key); }
+function time(at) { return at ? at.slice(11, 19) : ""; }
+
+function item(ev, deal, showPrivate) {
+  const t = ev.kind, priv = showPrivate && ev.private_detail ? `<div class="private">private to ${esc(ev.company)}: ${esc(ev.private_detail)}</div>` : "";
+  let cls = "info", icon = "•", title = "", detail = "";
+  if (t === "mandate") { cls = "warn"; icon = "M"; title = `${company(ev.company, deal)} committed mandate ${esc(ev.label)}`;
+    detail = showPrivate ? `<span class="mono">${esc(ev.rules)}</span>` : "Limits stay private; only a salted hash goes on the ledger."; }
+  else if (t === "offer") { const ok = ev.verdict === "STAMPED"; cls = ok ? "ok" : "bad"; icon = ok ? "✓" : "✕";
+    title = `${esc(ev.label)} ${ok ? "stamped" : "blocked"} · ${company(ev.company, deal)}`; detail = `${who(ev.sender, deal)} offered ${esc(ev.terms)}${ev.reason ? " · " + esc(ev.reason) : ""}`; }
+  else if (t === "accept") { cls = "bad"; icon = "✕"; title = `${company(ev.company, deal)} acceptance of ${esc(ev.offer)} blocked`;
+    detail = `${who(ev.sender, deal)} tried to accept · ${esc(ev.reason)}${ev.claim ? " · after an unverified approval claim" : ""}`; }
+  else if (t === "claim") { cls = "warn"; icon = "!"; title = `Unverified claim of approval`; detail = `${who(ev.sender, deal)}: “${esc(ev.text)}”`; }
+  else if (t === "approval") { cls = "ok"; icon = "✓"; title = `${company(ev.company, deal)} principal approved ${esc(ev.offer)}`; detail = `${who(ev.sender, deal)} · ${esc(ev.approval)} · bound to the exact terms`; }
+  else if (t === "decline") { cls = "bad"; icon = "✕"; title = `${company(ev.company, deal)} declined ${esc(ev.offer)}`; detail = who(ev.sender, deal); }
+  else if (t === "agreement") { cls = "info"; icon = "⇄"; title = `Agreement on ${esc(ev.offer)}`; detail = esc(ev.terms); }
+  else if (t === "countersign") { cls = "ok"; icon = "✍"; title = `${company(ev.company, deal)} countersigned`; detail = who(ev.sender, deal); }
+  else if (t === "closed") { cls = "ok"; icon = "★"; title = "Deal closed · certificate issued"; detail = `<span class="mono">root ${esc(ev.root.slice(0, 24))}…</span>`; }
+  else if (t === "overlap") { cls = "info"; icon = "?"; title = "Referee overlap check"; detail = ev.deal_exists ? "A deal exists inside both mandates." : "No deal satisfies both mandates."; }
+  return `<div class="event ${cls}"><div class="icon">${icon}</div><div><div class="title">${title}</div><div class="detail">${detail}</div>${priv}</div><div class="time">${time(ev.at)}</div></div>`;
+}
+
+function render(s) {
+  if (!s) return;
+  const deal = s.deal, showPrivate = $("private").checked;
+  $("status").textContent = s.status; $("status").className = "pill " + s.status;
+  $("subtitle").innerHTML = `Deal ${esc(deal.deal_id)} · ${esc(deal.product)} · ${company(deal.buyer.key, deal)} buys from ${company(deal.seller.key, deal)}. Every message in the deal’s rooms passes through the referee; only what it stamps is binding.`;
+  $("timeline").innerHTML = s.timeline.length ? s.timeline.map((e) => item(e, deal, showPrivate)).join("") : '<div class="empty">Waiting for the first message…</div>';
+  if (s.agreement) {
+    const t = s.agreement.terms, tcv = Math.floor(t.price_per_year * t.term_months / 12);
+    $("deal").innerHTML = `<div class="terms">
+      <div><label>Price / year</label><b>$${t.price_per_year.toLocaleString()}</b></div>
+      <div><label>Term</label><b>${t.term_months} mo</b></div>
+      <div><label>Payment</label><b>Net ${t.payment_days}</b></div>
+      <div><label>Seats</label><b>${t.seats}</b></div></div>
+      <div class="row" style="margin-top:10px"><span>Total contract value</span><b>$${tcv.toLocaleString()}</b></div>
+      <div class="row"><span>Offer</span><span>${esc(s.agreement.offer)} · via ${esc(s.agreement.via)}</span></div>`;
+  }
+  const rows = [];
+  for (const side of ["buyer", "seller"]) {
+    const c = deal[side], m = s.mandates[c.key];
+    rows.push(`<div class="row"><span>${company(c.key, deal)} · ${esc(c.agent)}</span><span class="mono">${m ? esc(m.label) + " · " + esc(m.commitment.slice(0, 10)) + "…" : "no mandate"}</span></div>`);
+    if (m && showPrivate) rows.push(`<div class="private mono">${esc(m.rules)}</div>`);
+  }
+  for (const a of s.approvals) rows.push(`<div class="row"><span>Approval ${esc(a.id)}</span><span>${who(a.principal, deal)} → ${esc(a.offer)}</span></div>`);
+  for (const k of Object.keys(s.countersigned)) rows.push(`<div class="row"><span>Countersigned</span><span>${who(s.countersigned[k].principal, deal)}</span></div>`);
+  $("authority").innerHTML = rows.join("");
+  $("chain").innerHTML = s.chain.map((e) => `<i class="${esc(e.kind)}" title="#${e.n} ${esc(e.kind)} · ${esc(e.hash.slice(0, 12))}…"></i>`).join("");
+  $("root").textContent = s.chain.length ? "head " + s.chain[s.chain.length - 1].hash : "";
+  const art = s.artifacts || {};
+  const link = (v) => v && v.startsWith("http") ? v : v ? "/files/" + v.split("/").pop() : "";
+  if (art.certificate) { $("dl-cert").hidden = false; $("dl-cert").href = link(art.certificate); $("dl-cert").download = "certificate.json"; $("verify-current").hidden = false; }
+  if (art.order_form) { $("dl-pdf").hidden = false; $("dl-pdf").href = link(art.order_form); }
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/state"); const text = await r.text();
+    if (text !== last) { last = text; state = JSON.parse(text); render(state); }
+  } catch (e) {}
+  setTimeout(poll, 1000);
+}
+async function verify(cert) {
+  const r = await fetch("/api/verify", {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({certificate: cert})});
+  const out = await r.json();
+  if (!r.ok) { $("checks").innerHTML = `<div class="row"><span class="fail">Error</span><span>${esc(out.detail)}</span></div>`; return; }
+  $("checks").innerHTML = out.checks.map((c) => `<div class="row"><span>${esc(c.name)}</span><span class="${c.ok === true ? "pass" : c.ok === false ? "fail" : "skip"}">${c.ok === true ? "PASS" : c.ok === false ? "FAIL" : "SKIP"}</span></div><div style="color:var(--muted);font-size:12px;margin:-4px 0 6px">${esc(c.detail)}</div>`).join("")
+    + `<div class="row"><b>Result</b><b class="${out.valid ? "pass" : "fail"}">${out.valid ? "VALID" : "NOT VALID"}</b></div>`;
+}
+$("verify-current").onclick = async () => { const r = await fetch($("dl-cert").href); verify(await r.json()); };
+$("file").onchange = async (e) => { const f = e.target.files[0]; if (f) verify(JSON.parse(await f.text())); };
+poll();
+</script>
+</body>
+</html>
